@@ -17,13 +17,6 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline
 
-try:
-    print("loading model...", file=sys.stderr)
-    llm = pipeline("text-generation", model="gpt2", max_new_tokens=256)
-    print("model loaded", file=sys.stderr)
-except:
-    pass
-
 docs = [
     {
         "id": "1",
@@ -47,7 +40,7 @@ docs = [
     },
 ]
 
-vectorizer = TfidfVectorizer()
+vectorizer = TfidfVectorizer(stop_words="english")
 vectors = vectorizer.fit_transform([x["txt"] for x in docs])
 
 retrieved_docs = []
@@ -147,8 +140,21 @@ def call_model():
     prompt = "Context:\n{}\nQuestion: {}\n\nAnswer the question based only on the context above. Cite sources using [1], [2], etc. Be concise.\n\nAnswer:".format(
         ctx, temp_storage["question"]
     )
-    output = llm(prompt)
-    answer = output[0]["generated_text"].split("Answer:")[-1].strip()
+    print("loading model...", file=sys.stderr)
+    try:
+        llm = pipeline("text-generation", model="gpt2", max_new_tokens=256)
+    except Exception as error:
+        sys.exit(f"Could not load model 'gpt2': {error}")
+    print("model loaded", file=sys.stderr)
+
+    output = llm(
+        prompt,
+        return_full_text=False,
+        do_sample=False,
+        no_repeat_ngram_size=3,
+        pad_token_id=llm.tokenizer.eos_token_id,
+    )
+    answer = output[0]["generated_text"].strip()
 
     if answer == "":
         answer = "idk"
