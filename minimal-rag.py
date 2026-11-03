@@ -17,31 +17,34 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline
 
+NO_DOCS_ANSWER = "No document matches found, cannot answer."
+NO_MODEL_ANSWER = "The model returned no answer."
+
 docs = [
     {
         "id": "1",
-        "txt": "Python is a high-level, interpreted programming language. It was created by Guido van Rossum and first released in 1991. Python emphasizes code readability with its notable use of significant whitespace.",
+        "text": "Python is a high-level, interpreted programming language. It was created by Guido van Rossum and first released in 1991. Python emphasizes code readability with its notable use of significant whitespace.",
     },
     {
         "id": "2",
-        "txt": "FastAPI is a modern, fast web framework for building APIs with Python 3.7+. It is based on standard Python type hints and provides automatic API documentation. FastAPI is one of the fastest Python frameworks available.",
+        "text": "FastAPI is a modern, fast web framework for building APIs with Python 3.7+. It is based on standard Python type hints and provides automatic API documentation. FastAPI is one of the fastest Python frameworks available.",
     },
     {
         "id": "3",
-        "txt": "Machine learning is a subset of artificial intelligence that enables systems to learn and improve from experience. It uses algorithms to parse data, learn from it, and make predictions or decisions without being explicitly programmed.",
+        "text": "Machine learning is a subset of artificial intelligence that enables systems to learn and improve from experience. It uses algorithms to parse data, learn from it, and make predictions or decisions without being explicitly programmed.",
     },
     {
         "id": "4",
-        "txt": "RAG (Retrieval-Augmented Generation) combines information retrieval with text generation. It retrieves relevant documents from a knowledge base and uses them to generate informed, contextual answers. This approach improves accuracy and reduces hallucinations.",
+        "text": "RAG (Retrieval-Augmented Generation) combines information retrieval with text generation. It retrieves relevant documents from a knowledge base and uses them to generate informed, contextual answers. This approach improves accuracy and reduces hallucinations.",
     },
     {
         "id": "5",
-        "txt": "Vector databases store data as high-dimensional vectors and enable efficient similarity search. They are essential for modern AI applications, particularly in semantic search and retrieval systems. Common examples include Pinecone, Weaviate, and Chroma.",
+        "text": "Vector databases store data as high-dimensional vectors and enable efficient similarity search. They are essential for modern AI applications, particularly in semantic search and retrieval systems. Common examples include Pinecone, Weaviate, and Chroma.",
     },
 ]
 
 vectorizer = TfidfVectorizer(stop_words="english")
-vectors = vectorizer.fit_transform([x["txt"] for x in docs])
+vectors = vectorizer.fit_transform([x["text"] for x in docs])
 
 retrieved_docs = []
 answer = ""
@@ -104,7 +107,7 @@ def get_data():
 get_data()
 
 if len(retrieved_docs) == 0:
-    answer = "idk"
+    answer = NO_DOCS_ANSWER
     problems.append("no docs")
     score = score * 0.4
     is_valid = False
@@ -114,7 +117,11 @@ if len(retrieved_docs) == 0:
                 {
                     "answer": answer,
                     "citations": retrieved_docs,
-                    "critique": {"ok": is_valid, "score": score, "problems": problems},
+                    "critique": {
+                        "passed": is_valid,
+                        "confidence": score,
+                        "problems": problems,
+                    },
                 },
                 indent=2,
             )
@@ -134,7 +141,7 @@ def call_model():
     counter = 0
     for r in retrieved_docs:
         counter += 1
-        ctx += f"[{counter}] {r['doc']['txt']}\n\n"
+        ctx += f"[{counter}] {r['doc']['text']}\n\n"
 
     temp_storage["context"] = ctx
     prompt = "Context:\n{}\nQuestion: {}\n\nAnswer the question based only on the context above. Cite sources using [1], [2], etc. Be concise.\n\nAnswer:".format(
@@ -157,7 +164,7 @@ def call_model():
     answer = output[0]["generated_text"].strip()
 
     if answer == "":
-        answer = "idk"
+        answer = NO_MODEL_ANSWER
 
 
 call_model()
@@ -168,19 +175,23 @@ def validate_output():
     problems = []
     score = 1.0
 
-    if "idk" in answer.lower():
-        problems.append("no info")
+    if answer == NO_MODEL_ANSWER:
+        problems.append("no answer")
         score = score * 0.5
 
     if len(answer) < 20:
-        problems.append("short")
+        problems.append("short answer")
         score = score * 0.3
 
-    refs = re.findall(r"\[(\d+)\]", answer)
+    refs = [
+        number
+        for number in map(int, re.findall(r"\[(\d+)\]", answer))
+        if 1 <= number <= len(retrieved_docs)
+    ]
 
     if len(retrieved_docs) > 0:
         if len(refs) == 0:
-            problems.append("no refs")
+            problems.append("no citations")
             score = score * 0.7
 
         avg = 0
@@ -206,7 +217,7 @@ validate_output()
 result = {
     "answer": answer,
     "citations": retrieved_docs,
-    "critique": {"ok": is_valid, "score": score, "problems": problems},
+    "critique": {"passed": is_valid, "confidence": score, "problems": problems},
 }
 
 if use_json:
@@ -217,7 +228,7 @@ else:
     print("Citations:")
 
     for r in retrieved_docs:
-        doc_text = r["doc"]["txt"]
+        doc_text = r["doc"]["text"]
         if len(doc_text) > 80:
             doc_text = doc_text[:80] + "..."
         print(
