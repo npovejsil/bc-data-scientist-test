@@ -1,12 +1,14 @@
 """
-This script implements a minimal Retrieval-Augmented Generation (RAG) pipeline. It retrieves relevant documents
-from a predefined knowledge base using TF-IDF vectorization and cosine similarity, then generates a contextual
-response to a user-provided question using a Qwen2.5 Instruct language model. The script evaluates the quality of the
-response based on relevance, references, and length, providing a critique and confidence score. It can be run
-from the command line with options to specify the number of documents to retrieve and output format.
-"""
+A minimal Retrieval-Augmented Generation (RAG) pipeline.
 
-# minimal rag
+1. Retrieve: rank the documents in KNOWLEDGE_BASE against the question with TF-IDF and cosine similarity.
+2. Generate: ask a Qwen2.5 Instruct model to answer using only the retrieved documents, citing them as [1], [2], ...
+3. Critique: score the answer's confidence based on its length, citations, and the retrieval relevance.
+
+Usage:
+    python minimal-rag.py "What is RAG?"              # readable report
+    python minimal-rag.py "What is RAG?" -k 2 --json  # JSON only, at most 2 documents
+"""
 
 import argparse
 import json
@@ -21,8 +23,11 @@ from transformers import pipeline
 # Ungated Hugging Face chat models can work without login here.
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 MAX_NEW_TOKENS = 256
+# Maximum number of documents passed to the LLM.
 DEFAULT_K = 3
 
+# Hand-picked heuristics, not tuned. Penalty nearer 1.0 = milder problem.
+# Pass requires confidence > 0.6: lone "no citations" passes, lone "low relevance" fails.
 MIN_ANSWER_CHARS = 20
 MIN_AVG_RELEVANCE = 0.1
 MIN_PASSING_CONFIDENCE = 0.6
@@ -65,7 +70,7 @@ def get_args():
     parser = argparse.ArgumentParser(
         description="Answer a question from a small knowledge base and critique the answer.",
     )
-    parser.add_argument("question", help="the question to answer")
+    parser.add_argument("question", help="the question to answer")  # required (no dash)
     parser.add_argument(
         "-k",
         type=int,
@@ -75,7 +80,7 @@ def get_args():
     parser.add_argument(
         "--json",
         dest="output_json",
-        action="store_true",
+        action="store_true",  # default false if no --json flag set
         help="print the result as JSON instead of a readable report",
     )
     args = parser.parse_args()
@@ -85,6 +90,8 @@ def get_args():
 
 
 def retrieve_docs(question, k):
+    """Return up to k matching documents, best first, each as {"citation_number": rank, "doc": ..., "score": similarity}."""
+    # Drop stop words so "what"/"is" don't match.
     vectorizer = TfidfVectorizer(stop_words="english")
     doc_vectors = vectorizer.fit_transform([doc["text"] for doc in KNOWLEDGE_BASE])
     question_vector = vectorizer.transform([question])
@@ -94,6 +101,7 @@ def retrieve_docs(question, k):
     retrieved_docs = []
     for i in ranked_indices[:k]:
         assert scores[i] >= 0
+        # 0 = no shared words.
         if scores[i] > 0:
             retrieved_docs.append(
                 {
@@ -106,6 +114,7 @@ def retrieve_docs(question, k):
 
 
 def generate_answer(question, retrieved_docs):
+    """Ask the model to answer the question using only the retrieved documents."""
     context = ""
     for retrieved in retrieved_docs:
         context += f"[{retrieved['citation_number']}] {retrieved['doc']['text']}\n\n"
@@ -124,6 +133,7 @@ def generate_answer(question, retrieved_docs):
         {"role": "user", "content": f"Context:\n{context}\nQuestion: {question}"},
     ]
 
+    # stderr keeps stdout clean for --json.
     print("loading model...", file=sys.stderr)
     try:
         # auto keeps the checkpoint's bfloat16: half the memory of float32.
@@ -137,13 +147,16 @@ def generate_answer(question, retrieved_docs):
         sys.exit(f"Could not load model '{MODEL_NAME}': {error}")
     print("model loaded", file=sys.stderr)
 
+    # Greedy decoding for repeatable answers (most likely token next).
     output = llm(messages, return_full_text=False, do_sample=False)
     return output[0]["generated_text"].strip() or NO_MODEL_ANSWER
 
 
 def critique_answer(answer, retrieved_docs):
+    """Run heuristic quality checks on the answer and score its confidence."""
     problems = []
     if not retrieved_docs:
+        # Other checks would be irrelevant if this problem occurs.
         problems.append("no docs")
     else:
         if answer == NO_MODEL_ANSWER:
@@ -152,6 +165,7 @@ def critique_answer(answer, retrieved_docs):
         if len(answer) < MIN_ANSWER_CHARS:
             problems.append("short answer")
 
+        # Only count citations of retrieved docs (use [int] regex expression).
         cited_numbers = [int(number) for number in re.findall(r"\[(\d+)\]", answer)]
         valid_citations = [
             number for number in cited_numbers if 1 <= number <= len(retrieved_docs)
