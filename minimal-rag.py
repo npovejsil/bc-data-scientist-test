@@ -8,6 +8,7 @@ from the command line with options to specify the number of documents to retriev
 
 # minimal rag
 
+import argparse
 import sys
 import numpy as np
 import re
@@ -17,9 +18,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline
 
 try:
-    print("loading model...")
+    print("loading model...", file=sys.stderr)
     llm = pipeline("text-generation", model="gpt2", max_new_tokens=256)
-    print("model loaded")
+    print("model loaded", file=sys.stderr)
 except:
     pass
 
@@ -56,25 +57,29 @@ score = 1.0
 is_valid = False
 temp_storage = {}
 
-if len(sys.argv) < 2:
-    print("usage: python minimal-rag.py <question> [-k NUM] [--json]")
-    print("example: python minimal-rag.py 'What is RAG?' -k 2 --json")
-    sys.exit(1)
+parser = argparse.ArgumentParser(
+    description="Answer a question from a small knowledge base and critique the answer.",
+)
+parser.add_argument("question", help="the question to answer")
+parser.add_argument(
+    "-k",
+    type=int,
+    default=3,
+    help="maximum number of documents to retrieve (default: 3)",
+)
+parser.add_argument(
+    "--json",
+    dest="output_json",
+    action="store_true",
+    help="print the result as JSON instead of a readable report",
+)
+args = parser.parse_args()
+if args.k < 1:
+    parser.error(f"-k must be at least 1, got {args.k}")
 
-question = sys.argv[1]
-k = 3
-use_json = False
-i = 2
-
-while i < len(sys.argv):
-    if sys.argv[i] == "-k":
-        k = int(sys.argv[i + 1])
-        i += 2
-    elif sys.argv[i] == "--json":
-        use_json = True
-        i += 1
-    else:
-        i += 1
+question = args.question
+k = args.k
+use_json = args.output_json
 
 retrieved_docs = []
 answer = ""
@@ -92,7 +97,13 @@ def get_data():
 
     for i in indices:
         if similarities[i] > 0:
-            retrieved_docs.append({"doc": docs[i], "score": float(similarities[i])})
+            retrieved_docs.append(
+                {
+                    "citation_number": len(retrieved_docs) + 1,
+                    "doc": docs[i],
+                    "score": float(similarities[i]),
+                }
+            )
             if len(retrieved_docs) >= k:
                 break
 
@@ -104,11 +115,6 @@ if len(retrieved_docs) == 0:
     problems.append("no docs")
     score = score * 0.4
     is_valid = False
-    print("\nQ: {}".format(question))
-    print(f"\nA: {answer}\n")
-    print("Citations: None")
-    print("\nCritique: ISSUES (confidence: {:.2f})".format(score))
-    print("Problems: %s" % ", ".join(problems))
     if use_json:
         print(
             json.dumps(
@@ -120,6 +126,12 @@ if len(retrieved_docs) == 0:
                 indent=2,
             )
         )
+    else:
+        print("\nQ: {}".format(question))
+        print(f"\nA: {answer}\n")
+        print("Citations: None")
+        print("\nCritique: ISSUES (confidence: {:.2f})".format(score))
+        print("Problems: %s" % ", ".join(problems))
     sys.exit(0)
 
 
@@ -185,24 +197,6 @@ def validate_output():
 
 validate_output()
 
-print("\nQ: {}".format(question))
-print(f"\nA: {answer}\n")
-print("Citations:")
-
-for r in retrieved_docs:
-    doc_text = r["doc"]["txt"]
-    if len(doc_text) > 80:
-        doc_text = doc_text[:80] + "..."
-    print("  [{}] (score: {:.3f}) {}".format(r["doc"]["id"], r["score"], doc_text))
-
-if is_valid:
-    print("\nCritique: OK (confidence: {:.2f})".format(score))
-else:
-    print(f"\nCritique: ISSUES (confidence: {score:.2f})")
-
-if len(problems) > 0:
-    print("Problems: %s" % ", ".join(problems))
-
 result = {
     "answer": answer,
     "citations": retrieved_docs,
@@ -211,3 +205,25 @@ result = {
 
 if use_json:
     print(json.dumps(result, indent=2))
+else:
+    print("\nQ: {}".format(question))
+    print(f"\nA: {answer}\n")
+    print("Citations:")
+
+    for r in retrieved_docs:
+        doc_text = r["doc"]["txt"]
+        if len(doc_text) > 80:
+            doc_text = doc_text[:80] + "..."
+        print(
+            "  [{}] (doc {}, score: {:.3f}) {}".format(
+                r["citation_number"], r["doc"]["id"], r["score"], doc_text
+            )
+        )
+
+    if is_valid:
+        print("\nCritique: OK (confidence: {:.2f})".format(score))
+    else:
+        print(f"\nCritique: ISSUES (confidence: {score:.2f})")
+
+    if len(problems) > 0:
+        print("Problems: %s" % ", ".join(problems))
