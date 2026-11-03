@@ -1,7 +1,7 @@
 """
 This script implements a minimal Retrieval-Augmented Generation (RAG) pipeline. It retrieves relevant documents
 from a predefined knowledge base using TF-IDF vectorization and cosine similarity, then generates a contextual
-response to a user-provided question using a GPT-2 language model. The script evaluates the quality of the
+response to a user-provided question using a Qwen2.5 Instruct language model. The script evaluates the quality of the
 response based on relevance, references, and length, providing a critique and confidence score. It can be run
 from the command line with options to specify the number of documents to retrieve and output format.
 """
@@ -18,7 +18,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline
 
-MODEL_NAME = "gpt2"
+# Ungated Hugging Face chat models can work without login here.
+MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 MAX_NEW_TOKENS = 256
 DEFAULT_K = 3
 
@@ -109,32 +110,34 @@ def generate_answer(question, retrieved_docs):
     for retrieved in retrieved_docs:
         context += f"[{retrieved['citation_number']}] {retrieved['doc']['text']}\n\n"
 
-    prompt = f"""Context:
-{context}
-Question: {question}
-
-Answer the question based only on the context above. Cite sources using [1], [2], etc. Be concise.
-
-Answer:"""
+    messages = [
+        {
+            "role": "system",
+            "content": "Answer the question based only on the context provided. End every sentence with the number in brackets of the passage it came from, e.g. [1]. Be concise.",
+        },
+        # Small models tend to skip citations unless shown one.
+        {
+            "role": "user",
+            "content": "Context:\n[1] Oslo is the capital of Norway.\n\n[2] Paris is the capital of France.\n\nQuestion: What is the capital of France?",
+        },
+        {"role": "assistant", "content": "Paris is the capital of France [2]."},
+        {"role": "user", "content": f"Context:\n{context}\nQuestion: {question}"},
+    ]
 
     print("loading model...", file=sys.stderr)
     try:
+        # auto keeps the checkpoint's bfloat16: half the memory of float32.
         llm = pipeline(
             "text-generation",
             model=MODEL_NAME,
             max_new_tokens=MAX_NEW_TOKENS,
+            dtype="auto",
         )
     except Exception as error:
         sys.exit(f"Could not load model '{MODEL_NAME}': {error}")
     print("model loaded", file=sys.stderr)
 
-    output = llm(
-        prompt,
-        return_full_text=False,
-        do_sample=False,
-        no_repeat_ngram_size=3,
-        pad_token_id=llm.tokenizer.eos_token_id,
-    )
+    output = llm(messages, return_full_text=False, do_sample=False)
     return output[0]["generated_text"].strip() or NO_MODEL_ANSWER
 
 
