@@ -9,18 +9,34 @@ from the command line with options to specify the number of documents to retriev
 # minimal rag
 
 import argparse
-import sys
-import numpy as np
-import re
 import json
+import re
+import sys
+
+import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline
 
+MODEL_NAME = "gpt2"
+MAX_NEW_TOKENS = 256
+DEFAULT_K = 3
+
+MIN_ANSWER_CHARS = 20
+MIN_AVG_RELEVANCE = 0.1
+MIN_PASSING_CONFIDENCE = 0.6
+PROBLEM_PENALTIES = {
+    "no docs": 0.4,
+    "no answer": 0.5,
+    "short answer": 0.3,
+    "no citations": 0.7,
+    "low relevance": 0.6,
+}
+
 NO_DOCS_ANSWER = "No document matches found, cannot answer."
 NO_MODEL_ANSWER = "The model returned no answer."
 
-docs = [
+KNOWLEDGE_BASE = [
     {
         "id": "1",
         "text": "Python is a high-level, interpreted programming language. It was created by Guido van Rossum and first released in 1991. Python emphasizes code readability with its notable use of significant whitespace.",
@@ -43,115 +59,73 @@ docs = [
     },
 ]
 
-vectorizer = TfidfVectorizer(stop_words="english")
-vectors = vectorizer.fit_transform([x["text"] for x in docs])
 
-retrieved_docs = []
-answer = ""
-problems = []
-score = 1.0
-is_valid = False
-temp_storage = {}
-
-parser = argparse.ArgumentParser(
-    description="Answer a question from a small knowledge base and critique the answer.",
-)
-parser.add_argument("question", help="the question to answer")
-parser.add_argument(
-    "-k",
-    type=int,
-    default=3,
-    help="maximum number of documents to retrieve (default: 3)",
-)
-parser.add_argument(
-    "--json",
-    dest="output_json",
-    action="store_true",
-    help="print the result as JSON instead of a readable report",
-)
-args = parser.parse_args()
-if args.k < 1:
-    parser.error(f"-k must be at least 1, got {args.k}")
-
-question = args.question
-k = args.k
-use_json = args.output_json
-
-retrieved_docs = []
-answer = ""
-problems = []
-score = 1.0
-temp_storage["question"] = question
+def get_args():
+    parser = argparse.ArgumentParser(
+        description="Answer a question from a small knowledge base and critique the answer.",
+    )
+    parser.add_argument("question", help="the question to answer")
+    parser.add_argument(
+        "-k",
+        type=int,
+        default=DEFAULT_K,
+        help=f"maximum number of documents to retrieve (default: {DEFAULT_K})",
+    )
+    parser.add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="print the result as JSON instead of a readable report",
+    )
+    args = parser.parse_args()
+    if args.k < 1:
+        parser.error(f"-k must be at least 1, got {args.k}")
+    return args
 
 
-def get_data():
-    global retrieved_docs, temp_storage
-    query_vec = vectorizer.transform([question])
-    similarities = cosine_similarity(query_vec, vectors)[0]
-    indices = np.argsort(similarities)[-k:][::-1]
-    temp_storage["sims"] = similarities
+def retrieve_docs(question, k):
+    vectorizer = TfidfVectorizer(stop_words="english")
+    doc_vectors = vectorizer.fit_transform([doc["text"] for doc in KNOWLEDGE_BASE])
+    question_vector = vectorizer.transform([question])
+    scores = cosine_similarity(question_vector, doc_vectors)[0]
+    ranked_indices = np.argsort(scores)[::-1]
 
-    for i in indices:
-        if similarities[i] > 0:
+    retrieved_docs = []
+    for i in ranked_indices[:k]:
+        assert scores[i] >= 0
+        if scores[i] > 0:
             retrieved_docs.append(
                 {
                     "citation_number": len(retrieved_docs) + 1,
-                    "doc": docs[i],
-                    "score": float(similarities[i]),
+                    "doc": KNOWLEDGE_BASE[i],
+                    "score": float(scores[i]),
                 }
             )
-            if len(retrieved_docs) >= k:
-                break
+    return retrieved_docs
 
 
-get_data()
+def generate_answer(question, retrieved_docs):
+    context = ""
+    for retrieved in retrieved_docs:
+        context += f"[{retrieved['citation_number']}] {retrieved['doc']['text']}\n\n"
 
-if len(retrieved_docs) == 0:
-    answer = NO_DOCS_ANSWER
-    problems.append("no docs")
-    score = score * 0.4
-    is_valid = False
-    if use_json:
-        print(
-            json.dumps(
-                {
-                    "answer": answer,
-                    "citations": retrieved_docs,
-                    "critique": {
-                        "passed": is_valid,
-                        "confidence": score,
-                        "problems": problems,
-                    },
-                },
-                indent=2,
-            )
-        )
-    else:
-        print("\nQ: {}".format(question))
-        print(f"\nA: {answer}\n")
-        print("Citations: None")
-        print("\nCritique: ISSUES (confidence: {:.2f})".format(score))
-        print("Problems: %s" % ", ".join(problems))
-    sys.exit(0)
+    prompt = f"""Context:
+{context}
+Question: {question}
 
+Answer the question based only on the context above. Cite sources using [1], [2], etc. Be concise.
 
-def call_model():
-    global answer, temp_storage
-    ctx = ""
-    counter = 0
-    for r in retrieved_docs:
-        counter += 1
-        ctx += f"[{counter}] {r['doc']['text']}\n\n"
+Answer:"""
 
-    temp_storage["context"] = ctx
-    prompt = "Context:\n{}\nQuestion: {}\n\nAnswer the question based only on the context above. Cite sources using [1], [2], etc. Be concise.\n\nAnswer:".format(
-        ctx, temp_storage["question"]
-    )
     print("loading model...", file=sys.stderr)
     try:
-        llm = pipeline("text-generation", model="gpt2", max_new_tokens=256)
+        llm = pipeline(
+            "text-generation",
+            model=MODEL_NAME,
+            max_new_tokens=MAX_NEW_TOKENS,
+        )
     except Exception as error:
-        sys.exit(f"Could not load model 'gpt2': {error}")
+        sys.exit(f"Could not load model '{MODEL_NAME}': {error}")
     print("model loaded", file=sys.stderr)
 
     output = llm(
@@ -161,86 +135,72 @@ def call_model():
         no_repeat_ngram_size=3,
         pad_token_id=llm.tokenizer.eos_token_id,
     )
-    answer = output[0]["generated_text"].strip()
-
-    if answer == "":
-        answer = NO_MODEL_ANSWER
+    return output[0]["generated_text"].strip() or NO_MODEL_ANSWER
 
 
-call_model()
-
-
-def validate_output():
-    global problems, score, is_valid
+def critique_answer(answer, retrieved_docs):
     problems = []
-    score = 1.0
-
-    if answer == NO_MODEL_ANSWER:
-        problems.append("no answer")
-        score = score * 0.5
-
-    if len(answer) < 20:
-        problems.append("short answer")
-        score = score * 0.3
-
-    refs = [
-        number
-        for number in map(int, re.findall(r"\[(\d+)\]", answer))
-        if 1 <= number <= len(retrieved_docs)
-    ]
-
-    if len(retrieved_docs) > 0:
-        if len(refs) == 0:
-            problems.append("no citations")
-            score = score * 0.7
-
-        avg = 0
-        for r in retrieved_docs:
-            avg += r["score"]
-        avg = avg / len(retrieved_docs)
-
-        if avg < 0.1:
-            problems.append("low relevance")
-            score = score * 0.6
-
-    if score > 0.6:
-        if len(problems) < 3:
-            is_valid = True
-        else:
-            is_valid = False
+    if not retrieved_docs:
+        problems.append("no docs")
     else:
-        is_valid = False
+        if answer == NO_MODEL_ANSWER:
+            problems.append("no answer")
+
+        if len(answer) < MIN_ANSWER_CHARS:
+            problems.append("short answer")
+
+        cited_numbers = [int(number) for number in re.findall(r"\[(\d+)\]", answer)]
+        valid_citations = [
+            number for number in cited_numbers if 1 <= number <= len(retrieved_docs)
+        ]
+        if not valid_citations:
+            problems.append("no citations")
+
+        average_score = np.mean([retrieved["score"] for retrieved in retrieved_docs])
+        if average_score < MIN_AVG_RELEVANCE:
+            problems.append("low relevance")
+
+    confidence = 1.0
+    for problem in problems:
+        confidence *= PROBLEM_PENALTIES[problem]
+
+    return {
+        "passed": confidence > MIN_PASSING_CONFIDENCE,
+        "confidence": confidence,
+        "problems": problems,
+    }
 
 
-validate_output()
+def main():
+    args = get_args()
+    retrieved_docs = retrieve_docs(args.question, args.k)
 
-result = {
-    "answer": answer,
-    "citations": retrieved_docs,
-    "critique": {"passed": is_valid, "confidence": score, "problems": problems},
-}
+    if retrieved_docs:
+        answer = generate_answer(args.question, retrieved_docs)
+    else:
+        answer = NO_DOCS_ANSWER
+    critique = critique_answer(answer, retrieved_docs)
 
-if use_json:
-    print(json.dumps(result, indent=2))
-else:
-    print("\nQ: {}".format(question))
+    if args.output_json:
+        result = {"answer": answer, "citations": retrieved_docs, "critique": critique}
+        print(json.dumps(result, indent=2))
+        return
+
+    print(f"\nQ: {args.question}")
     print(f"\nA: {answer}\n")
-    print("Citations:")
 
-    for r in retrieved_docs:
-        doc_text = r["doc"]["text"]
-        if len(doc_text) > 80:
-            doc_text = doc_text[:80] + "..."
+    print("Citations:" if retrieved_docs else "Citations: None")
+    for retrieved in retrieved_docs:
+        doc = retrieved["doc"]
         print(
-            "  [{}] (doc {}, score: {:.3f}) {}".format(
-                r["citation_number"], r["doc"]["id"], r["score"], doc_text
-            )
+            f"  [{retrieved['citation_number']}] (doc {doc['id']}, score: {retrieved['score']:.3f}) {doc['text'][:80]}..."
         )
 
-    if is_valid:
-        print("\nCritique: OK (confidence: {:.2f})".format(score))
-    else:
-        print(f"\nCritique: ISSUES (confidence: {score:.2f})")
+    status = "OK" if critique["passed"] else "ISSUES"
+    print(f"\nCritique: {status} (confidence: {critique['confidence']:.2f})")
+    if critique["problems"]:
+        print(f"Problems: {', '.join(critique['problems'])}")
 
-    if len(problems) > 0:
-        print("Problems: %s" % ", ".join(problems))
+
+if __name__ == "__main__":
+    main()
